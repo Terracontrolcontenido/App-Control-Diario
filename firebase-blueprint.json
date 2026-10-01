@@ -1,0 +1,178 @@
+{
+  "entities": {
+    "Responsible": {
+      "title": "Responsible",
+      "description": "Team member responsible for daily publications",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique ID of the responsible"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "Short name of the responsible"
+        },
+        "photoUrl": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Optional avatar URL or preset key"
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether the responsible is currently active"
+        },
+        "dailyGoal": {
+          "type": "number",
+          "description": "Total daily goal, default 9"
+        },
+        "facebookGoal": {
+          "type": "number",
+          "description": "Daily Meta/Facebook goal, default 8"
+        },
+        "instagramGoal": {
+          "type": "number",
+          "description": "Daily Instagram goal, default 1"
+        },
+        "order": {
+          "type": "number",
+          "description": "Display order index"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of creation"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update"
+        }
+      },
+      "required": ["id", "name", "active", "dailyGoal", "facebookGoal", "instagramGoal"]
+    },
+    "DailyReport": {
+      "title": "DailyReport",
+      "description": "Aggregated daily report summary for a specific date (YYYY-MM-DD)",
+      "type": "object",
+      "properties": {
+        "date": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "Target date string"
+        },
+        "totalResponsibles": {
+          "type": "number",
+          "description": "Count of active responsibles on this date"
+        },
+        "completed": {
+          "type": "number",
+          "description": "Count who reached goal"
+        },
+        "notCompleted": {
+          "type": "number",
+          "description": "Count who did not complete"
+        },
+        "pending": {
+          "type": "number",
+          "description": "Count still pending"
+        },
+        "justified": {
+          "type": "number",
+          "description": "Count justified"
+        },
+        "completionRate": {
+          "type": "number",
+          "description": "Percentage of completion"
+        },
+        "aiObservation": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "AI-generated or edited daily summary observation"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update"
+        }
+      },
+      "required": ["date", "totalResponsibles", "completed", "completionRate"]
+    },
+    "ResponsibleDailyRecord": {
+      "title": "ResponsibleDailyRecord",
+      "description": "Daily publication tracking record for an individual responsible on a date",
+      "type": "object",
+      "properties": {
+        "responsibleId": {
+          "type": "string",
+          "description": "ID of responsible"
+        },
+        "responsibleName": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "Snapshot of responsible name"
+        },
+        "date": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "Date YYYY-MM-DD"
+        },
+        "metaChecks": {
+          "type": "array",
+          "description": "Array of 8 booleans for Facebook/Meta publications"
+        },
+        "instagramCheck": {
+          "type": "boolean",
+          "description": "Boolean for Instagram publication"
+        },
+        "metaCount": {
+          "type": "number",
+          "description": "Confirmed Facebook count (0-8)"
+        },
+        "instagramCount": {
+          "type": "number",
+          "description": "Confirmed Instagram count (0-1)"
+        },
+        "totalCount": {
+          "type": "number",
+          "description": "Total confirmed (0-9)"
+        },
+        "totalGoal": {
+          "type": "number",
+          "description": "Total target (default 9)"
+        },
+        "progressPercent": {
+          "type": "number",
+          "description": "Progress percentage (0-100)"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["completed", "pending", "not_completed", "justified"],
+          "description": "Current status"
+        },
+        "aiObservation": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Individual AI observation note"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update"
+        }
+      },
+      "required": ["responsibleId", "date", "status", "totalCount"]
+    }
+  },
+  "firestore": {
+    "/responsibles/{responsibleId}": {
+      "schema": { "$ref": "#/entities/Responsible" },
+      "description": "Directory of Terra team responsibles"
+    },
+    "/dailyReports/{date}": {
+      "schema": { "$ref": "#/entities/DailyReport" },
+      "description": "Daily summary reports by date"
+    },
+    "/dailyReports/{date}/records/{responsibleId}": {
+      "schema": { "$ref": "#/entities/ResponsibleDailyRecord" },
+      "description": "Daily records of publication checks per responsible"
+    }
+  }
+}

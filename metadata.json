@@ -1,0 +1,6 @@
+{
+  "name": "Control Diario Terra",
+  "description": "Aplicación móvil para el control, seguimiento y reporte diario de publicaciones del equipo Terra con base de datos en tiempo real y asistencia de IA.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
