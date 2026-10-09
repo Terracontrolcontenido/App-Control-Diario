@@ -13,14 +13,43 @@ export async function generateDailyAIObservation(
     return 'No hay registros cargados para esta fecha.';
   }
 
-  const completed = records.filter((r) => r.status === 'completed' || r.totalCount >= 9).length;
-  const pending = records.filter((r) => r.status === 'pending' && r.totalCount < 9);
+  const sampleRec = records[0];
+  const fbGoal = sampleRec?.facebookChecks ? sampleRec.facebookChecks.length : 6;
+  const mpGoal = sampleRec?.marketplaceChecks ? sampleRec.marketplaceChecks.length : 1;
+  const igGoal = 1;
+  const targetGoal = sampleRec?.totalGoal || (fbGoal + mpGoal + igGoal);
+
+  const completed = records.filter(
+    (r) => r.status === 'completed' || r.totalCount >= (r.totalGoal || targetGoal)
+  ).length;
+  const pending = records.filter(
+    (r) => r.status === 'pending' && r.totalCount < (r.totalGoal || targetGoal)
+  );
   const notCompleted = records.filter((r) => r.status === 'not_completed');
   const justified = records.filter((r) => r.status === 'justified');
 
-  const pendingMeta = records.reduce((acc, r) => acc + (8 - (r.metaCount || 0)), 0);
-  const pendingIg = records.reduce((acc, r) => acc + (1 - (r.instagramCount || 0)), 0);
-  const totalPending = pendingMeta + pendingIg;
+  // Calculate missing per platform
+  let pendingFb = 0;
+  let pendingMp = 0;
+  let pendingIg = 0;
+
+  records.forEach((r) => {
+    const curFbChecks = r.facebookChecks || [];
+    const completedFb = curFbChecks.filter(Boolean).length;
+    const curFbGoal = curFbChecks.length > 0 ? curFbChecks.length : fbGoal;
+    pendingFb += Math.max(0, curFbGoal - completedFb);
+
+    const curMpChecks = r.marketplaceChecks || [];
+    const completedMp = curMpChecks.filter(Boolean).length;
+    const curMpGoal = curMpChecks.length > 0 ? curMpChecks.length : mpGoal;
+    pendingMp += Math.max(0, curMpGoal - completedMp);
+
+    const completedIg = r.instagramCheck ? 1 : (r.instagramCount || 0);
+    pendingIg += Math.max(0, igGoal - completedIg);
+  });
+
+  const totalPending = pendingFb + pendingMp + pendingIg;
+  const completionRate = Math.round((completed / total) * 100);
 
   // Try server-side Gemini API proxy first
   try {
@@ -35,13 +64,12 @@ export async function generateDailyAIObservation(
         notCompletedCount: notCompleted.length,
         justifiedCount: justified.length,
         totalPendingPosts: totalPending,
-        pendingMeta,
+        pendingMeta: pendingFb,
+        pendingMarketplace: pendingMp,
         pendingIg,
         details: records.map((r) => ({
           name: r.responsibleName,
-          meta: `${r.metaCount}/8`,
-          ig: `${r.instagramCount}/1`,
-          total: `${r.totalCount}/9`,
+          total: `${r.totalCount}/${r.totalGoal || targetGoal}`,
           status: r.status,
         })),
       }),
@@ -50,28 +78,144 @@ export async function generateDailyAIObservation(
     if (res.ok) {
       const data = await res.json();
       if (data.observation && data.observation.trim().length > 0) {
-        return data.observation.trim();
+        let obs = data.observation.trim();
+        // Ensure no AI words slipped through
+        obs = obs
+          .replace(/la\s+ia(\s+detecta)?/gi, 'la supervisión')
+          .replace(/como\s+ia/gi, '')
+          .replace(/inteligencia\s+artificial/gi, 'supervisión');
+        return obs;
       }
     }
   } catch {
     // Fall back to rule-based natural language generator
   }
 
-  // Exact, reliable rule-based observation matching prompt maestro specs
+  // Exact, high-level executive report (100% human phrasing)
   if (completed === total) {
-    return `¡Meta cumplida! Los ${total} responsables completaron exitosamente sus 9 publicaciones diarias (8 Meta + 1 Instagram).`;
+    return `Meta del día completada con éxito. El 100% de los responsables (${completed}/${total}) cumplieron oportunamente con todas sus publicaciones programadas en Facebook, Marketplace e Instagram con excelente regularidad.`;
   }
 
   if (completed >= Math.ceil(total * 0.7)) {
-    return `Buen cumplimiento general: ${completed} de ${total} completaron la meta. Quedan ${totalPending} pendientes (${pendingMeta} Facebook, ${pendingIg} Instagram).`;
+    const pendingDetails = [];
+    if (pendingFb > 0) pendingDetails.push(`${pendingFb} en Facebook`);
+    if (pendingMp > 0) pendingDetails.push(`${pendingMp} en Marketplace`);
+    if (pendingIg > 0) pendingDetails.push(`${pendingIg} en Instagram`);
+    const pendingText = pendingDetails.length > 0 ? ` (${pendingDetails.join(', ')})` : '';
+
+    return `Buen avance operativo con ${completed} de ${total} responsables (${completionRate}% de cumplimiento). Restan ${totalPending} publicaciones pendientes${pendingText}. Se recomienda seguimiento para cerrar el día sin faltantes.`;
   }
 
   if (totalPending > 0) {
-    const namesWithPending = pending.slice(0, 3).map((r) => r.responsibleName).join(', ');
-    return `${completed} de ${total} cumplieron. La IA detecta ${totalPending} publicaciones pendientes (${pendingMeta} en Meta/Facebook y ${pendingIg} en Instagram). Reforzar antes del cierre.`;
+    const pendingDetails = [];
+    if (pendingFb > 0) pendingDetails.push(`${pendingFb} en Facebook`);
+    if (pendingMp > 0) pendingDetails.push(`${pendingMp} en Marketplace`);
+    if (pendingIg > 0) pendingDetails.push(`${pendingIg} en Instagram`);
+    const pendingText = pendingDetails.length > 0 ? ` (${pendingDetails.join(', ')})` : '';
+
+    return `Cumplimiento del ${completionRate}% al momento (${completed} de ${total} responsables al día). Se registran ${totalPending} publicaciones pendientes${pendingText}. Se requiere reforzar la difusión antes del cierre de jornada.`;
   }
 
-  return `Reporte del día: ${completed} de ${total} responsables cumplieron con las 9 publicaciones diarias.`;
+  return `Reporte operativo del día: ${completed} de ${total} responsables completaron sus publicaciones diarias programadas.`;
+}
+
+/**
+ * Improves, polishes, and enriches user-provided notes/help text into a high-level
+ * executive observation for the day's report, combining user context with system metrics.
+ */
+export async function improveDailyObservationWithNotes(
+  userNotes: string,
+  records: ResponsibleDailyRecord[],
+  dateFormatted: string
+): Promise<string> {
+  const total = records.length;
+  const sampleRec = records[0];
+  const fbGoal = sampleRec?.facebookChecks ? sampleRec.facebookChecks.length : 6;
+  const mpGoal = sampleRec?.marketplaceChecks ? sampleRec.marketplaceChecks.length : 1;
+  const igGoal = 1;
+  const targetGoal = sampleRec?.totalGoal || (fbGoal + mpGoal + igGoal);
+
+  const completed = records.filter(
+    (r) => r.status === 'completed' || r.totalCount >= (r.totalGoal || targetGoal)
+  ).length;
+  const pending = records.filter(
+    (r) => r.status === 'pending' && r.totalCount < (r.totalGoal || targetGoal)
+  );
+  const notCompleted = records.filter((r) => r.status === 'not_completed');
+  const justified = records.filter((r) => r.status === 'justified');
+
+  let pendingFb = 0;
+  let pendingMp = 0;
+  let pendingIg = 0;
+
+  records.forEach((r) => {
+    const curFbChecks = r.facebookChecks || [];
+    const completedFb = curFbChecks.filter(Boolean).length;
+    const curFbGoal = curFbChecks.length > 0 ? curFbChecks.length : fbGoal;
+    pendingFb += Math.max(0, curFbGoal - completedFb);
+
+    const curMpChecks = r.marketplaceChecks || [];
+    const completedMp = curMpChecks.filter(Boolean).length;
+    const curMpGoal = curMpChecks.length > 0 ? curMpChecks.length : mpGoal;
+    pendingMp += Math.max(0, curMpGoal - completedMp);
+
+    const completedIg = r.instagramCheck ? 1 : (r.instagramCount || 0);
+    pendingIg += Math.max(0, igGoal - completedIg);
+  });
+
+  const totalPending = pendingFb + pendingMp + pendingIg;
+  const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+  try {
+    const res = await fetch('/api/ai/improve-observation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userNotes: userNotes.trim(),
+        date: dateFormatted,
+        total,
+        completed,
+        pendingCount: pending.length,
+        notCompletedCount: notCompleted.length,
+        justifiedCount: justified.length,
+        totalPendingPosts: totalPending,
+        pendingMeta: pendingFb,
+        pendingMarketplace: pendingMp,
+        pendingIg,
+        details: records.map((r) => ({
+          name: r.responsibleName,
+          total: `${r.totalCount}/${r.totalGoal || targetGoal}`,
+          status: r.status,
+        })),
+      }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data.observation && data.observation.trim().length > 0) {
+        let obs = data.observation.trim();
+        obs = obs
+          .replace(/la\s+ia(\s+detecta)?/gi, 'la supervisión')
+          .replace(/como\s+ia/gi, '')
+          .replace(/inteligencia\s+artificial/gi, 'supervisión')
+          .replace(/["*]/g, '');
+        return obs;
+      }
+    }
+  } catch {
+    // Fall back to local synthesis
+  }
+
+  // Graceful rule-based enhancement
+  const cleanNotes = userNotes.trim();
+  if (cleanNotes.length > 0) {
+    if (completed === total) {
+      return `${cleanNotes}. Meta del día cumplida al 100% con todos los responsables al día.`;
+    }
+    return `${cleanNotes}. Cumplimiento registrado del ${completionRate}% (${completed}/${total} al día) con ${totalPending} publicaciones pendientes por regularizar.`;
+  }
+
+  return `Supervisión del día: ${completed} de ${total} responsables cumplieron con su meta diaria programada.`;
 }
 
 /**

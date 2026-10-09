@@ -23,16 +23,14 @@ import {
 } from './services/storageService';
 import { testConnection } from './firebase/config';
 import { initLogoFromFirestore } from './services/logoService';
+import { getTodayDateString } from './utils/dateUtils';
 
 export default function App() {
   // Navigation tab: 'report' or 'management'
   const [activeTab, setActiveTab] = useState<'report' | 'management'>('report');
 
-  // Today's date default
-  const [currentDate, setCurrentDate] = useState<string>(() => {
-    const today = new Date();
-    return today.toISOString().split('T')[0];
-  });
+  // Today's date default using user device's local timezone (never UTC toISOString)
+  const [currentDate, setCurrentDate] = useState<string>(() => getTodayDateString());
 
   // State collections
   const [responsibles, setResponsibles] = useState<Responsible[]>([]);

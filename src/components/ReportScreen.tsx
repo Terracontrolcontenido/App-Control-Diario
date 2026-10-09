@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Calendar,
   Check,
@@ -13,6 +13,9 @@ import {
   Download,
   Loader2,
   CheckCircle2,
+  RotateCcw,
+  PencilLine,
+  Wand2,
 } from 'lucide-react';
 import { TerraLogo } from './TerraLogo';
 import { Responsible, ResponsibleDailyRecord, DailyReportSummary } from '../types';
@@ -20,8 +23,17 @@ import { renderReportToCanvas, AspectRatioMode } from '../utils/generateReportIm
 import {
   setQuickStatus,
   saveDailySummary,
+  sortRecordsByFulfillment,
+  resetDailyPublicationRecords,
 } from '../services/storageService';
-import { generateDailyAIObservation } from '../services/aiService';
+import {
+  generateDailyAIObservation,
+  improveDailyObservationWithNotes,
+} from '../services/aiService';
+import {
+  addDaysToDateString,
+  formatSpanishDate,
+} from '../utils/dateUtils';
 
 interface ReportScreenProps {
   currentDate: string;
@@ -43,53 +55,54 @@ export const ReportScreen: React.FC<ReportScreenProps> = ({
   const [aiGenerating, setAiGenerating] = useState(false);
   const [customObservation, setCustomObservation] = useState<string>('');
   const [showExportModal, setShowExportModal] = useState(false);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
   const [exportedImageUri, setExportedImageUri] = useState<string | null>(null);
   const [isRenderingImage, setIsRenderingImage] = useState(false);
   const [shareSuccess, setShareSuccess] = useState(false);
   const [exportMode, setExportMode] = useState<AspectRatioMode>('ultra-vertical');
+  const [showUserNotesModal, setShowUserNotesModal] = useState(false);
+  const [userNotesInput, setUserNotesInput] = useState('');
+  const [improvingWithNotes, setImprovingWithNotes] = useState(false);
 
   // Synchronize observation state with dailySummary or default
   const effectiveObservation = customObservation || dailySummary?.aiObservation || '';
 
+  // Sort responsibles so top performers are at the top (descending order of fulfillment)
+  const sortedRecords = useMemo(() => {
+    return sortRecordsByFulfillment(records);
+  }, [records]);
+
   // Formatted date string in Spanish: "Martes, 30 de septiembre de 2026"
   const formattedDate = useMemo(() => {
-    try {
-      const [year, month, day] = currentDate.split('-').map(Number);
-      const d = new Date(year, month - 1, day);
-      const weekday = d.toLocaleDateString('es-ES', { weekday: 'long' });
-      const monthName = d.toLocaleDateString('es-ES', { month: 'long' });
-      const capitalizedWeekday = weekday.charAt(0).toUpperCase() + weekday.slice(1);
-      return `${capitalizedWeekday}, ${day} de ${monthName} de ${year}`;
-    } catch {
-      return currentDate;
-    }
+    return formatSpanishDate(currentDate);
   }, [currentDate]);
 
-  // Next / Previous day helpers
+  // Auto-generate daily observation when records are loaded if none exists yet for this day
+  useEffect(() => {
+    if (records.length === 0 || aiGenerating) return;
+    if (!dailySummary?.aiObservation && !customObservation) {
+      handleGenerateAI();
+    }
+  }, [currentDate, records.length, dailySummary?.aiObservation]);
+
+  // Next / Previous day helpers (immune to UTC timezone jump)
   const handlePrevDay = () => {
-    const [y, m, d] = currentDate.split('-').map(Number);
-    const date = new Date(y, m - 1, d);
-    date.setDate(date.getDate() - 1);
-    const newStr = date.toISOString().split('T')[0];
-    onDateChange(newStr);
+    onDateChange(addDaysToDateString(currentDate, -1));
   };
 
   const handleNextDay = () => {
-    const [y, m, d] = currentDate.split('-').map(Number);
-    const date = new Date(y, m - 1, d);
-    date.setDate(date.getDate() + 1);
-    const newStr = date.toISOString().split('T')[0];
-    onDateChange(newStr);
+    onDateChange(addDaysToDateString(currentDate, 1));
   };
 
   // Stats calculation
   const stats = useMemo(() => {
     const total = records.length;
     const completed = records.filter(
-      (r) => r.status === 'completed' || r.totalCount >= 9
+      (r) => r.status === 'completed' || r.totalCount >= (r.totalGoal || 8)
     ).length;
     const notCompleted = records.filter((r) => r.status === 'not_completed').length;
-    const pending = records.filter((r) => r.status === 'pending' && r.totalCount < 9).length;
+    const pending = records.filter((r) => r.status === 'pending' && r.totalCount < (r.totalGoal || 8)).length;
     const justified = records.filter((r) => r.status === 'justified').length;
     const reviewed = records.filter((r) => r.totalCount > 0 || r.status !== 'pending').length;
     const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
@@ -111,7 +124,8 @@ export const ReportScreen: React.FC<ReportScreenProps> = ({
     const resp = responsibles.find((r) => r.id === record.responsibleId);
     if (!resp) return;
 
-    if (record.totalCount >= 9) {
+    const targetGoal = record.totalGoal || 8;
+    if (record.totalCount >= targetGoal) {
       await setQuickStatus(currentDate, resp, record, 'not_completed');
     } else {
       await setQuickStatus(currentDate, resp, record, 'completed');
@@ -148,8 +162,36 @@ export const ReportScreen: React.FC<ReportScreenProps> = ({
     }
   };
 
+  // Improve observation with user-provided notes/draft text
+  const handleApplyUserNotes = async () => {
+    if (!userNotesInput.trim() || improvingWithNotes) return;
+    setImprovingWithNotes(true);
+    try {
+      const improved = await improveDailyObservationWithNotes(
+        userNotesInput,
+        records,
+        formattedDate
+      );
+      setCustomObservation(improved);
+      await saveDailySummary(currentDate, {
+        aiObservation: improved,
+        totalResponsibles: stats.total,
+        completed: stats.completed,
+        notCompleted: stats.notCompleted,
+        pending: stats.pending,
+        justified: stats.justified,
+        completionRate: stats.completionRate,
+      });
+      setShowUserNotesModal(false);
+    } catch (err) {
+      console.error('Error improving observation with notes:', err);
+    } finally {
+      setImprovingWithNotes(false);
+    }
+  };
+
   const handleObservationChange = async (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const text = e.target.value.slice(0, 200);
+    const text = e.target.value.slice(0, 350);
     setCustomObservation(text);
     await saveDailySummary(currentDate, { aiObservation: text });
   };
@@ -160,16 +202,21 @@ export const ReportScreen: React.FC<ReportScreenProps> = ({
     setIsRenderingImage(true);
     setShowExportModal(true);
     try {
+      let obsToRender = effectiveObservation;
+      if (!obsToRender || obsToRender.trim().length === 0) {
+        obsToRender = await generateDailyAIObservation(records, formattedDate);
+        setCustomObservation(obsToRender);
+      }
       const canvas = await renderReportToCanvas(
         formattedDate,
-        records,
+        sortedRecords,
         {
           completed: stats.completed,
           notCompleted: stats.notCompleted,
           completionRate: stats.completionRate,
           reviewed: stats.reviewed,
         },
-        effectiveObservation,
+        obsToRender,
         targetMode
       );
       setExportedImageUri(canvas.toDataURL('image/png'));
@@ -183,6 +230,18 @@ export const ReportScreen: React.FC<ReportScreenProps> = ({
   const handleChangeExportMode = async (mode: AspectRatioMode) => {
     setExportMode(mode);
     await handleOpenExportModal(mode);
+  };
+
+  const handleResetDayPublications = async () => {
+    setIsResetting(true);
+    try {
+      await resetDailyPublicationRecords(currentDate, responsibles);
+      setShowResetConfirm(false);
+    } catch (e) {
+      console.error('Error resetting day publications:', e);
+    } finally {
+      setIsResetting(false);
+    }
   };
 
   // Share via WhatsApp / Web Share
@@ -236,9 +295,9 @@ export const ReportScreen: React.FC<ReportScreenProps> = ({
 
   return (
     <div className="flex flex-col w-full max-w-md mx-auto pb-10 px-3 pt-1 font-sans select-none">
-      {/* 1. Compact Header with Terra Official Logo */}
+      {/* 1. Header with Terra Official Logo */}
       <div className="flex flex-col items-center justify-center pt-0.5 pb-0.5">
-        <TerraLogo size="sm" />
+        <TerraLogo size="md" />
 
         <h1 className="mt-0.5 text-lg font-black tracking-tight text-gray-950 uppercase leading-none">
           REPORTE DEL DÍA
@@ -248,8 +307,8 @@ export const ReportScreen: React.FC<ReportScreenProps> = ({
         </p>
       </div>
 
-      {/* 2. Compact Date Selector Bar */}
-      <div className="mt-1.5 flex items-center justify-between bg-white border border-gray-200/90 rounded-xl px-2.5 py-1.5 shadow-2xs">
+      {/* 2. Clean Date Selector with Reset Button */}
+      <div className="mt-1 flex items-center justify-between px-2 py-1">
         <button
           onClick={handlePrevDay}
           className="p-1 rounded-lg text-gray-500 hover:text-gray-900 hover:bg-gray-100 transition active:scale-95"
@@ -258,19 +317,28 @@ export const ReportScreen: React.FC<ReportScreenProps> = ({
           <ChevronLeft className="w-4 h-4" />
         </button>
 
-        <div className="relative flex items-center gap-1.5 cursor-pointer group">
-          <div className="w-5 h-5 rounded-md bg-red-50 text-red-600 flex items-center justify-center">
-            <Calendar className="w-3 h-3" />
+        <div className="flex items-center gap-2">
+          <div className="relative flex items-center gap-1.5 cursor-pointer group">
+            <input
+              type="date"
+              value={currentDate}
+              onChange={(e) => e.target.value && onDateChange(e.target.value)}
+              className="absolute inset-0 opacity-0 cursor-pointer w-full"
+            />
+            <span className="text-xs font-bold text-gray-800 text-center group-hover:text-red-600 transition">
+              📅 {formattedDate}
+            </span>
           </div>
-          <input
-            type="date"
-            value={currentDate}
-            onChange={(e) => e.target.value && onDateChange(e.target.value)}
-            className="absolute inset-0 opacity-0 cursor-pointer w-full"
-          />
-          <span className="text-xs font-bold text-gray-800 text-center group-hover:text-red-600 transition">
-            {formattedDate}
-          </span>
+
+          <button
+            type="button"
+            onClick={() => setShowResetConfirm(true)}
+            className="flex items-center gap-1 text-[10px] font-bold text-gray-500 hover:text-red-600 bg-gray-100 hover:bg-red-50 px-2 py-0.5 rounded-lg transition active:scale-95 border border-gray-200"
+            title="Resetear publicaciones de este día"
+          >
+            <RotateCcw className="w-2.5 h-2.5" />
+            <span>Reset</span>
+          </button>
         </div>
 
         <button
@@ -282,95 +350,43 @@ export const ReportScreen: React.FC<ReportScreenProps> = ({
         </button>
       </div>
 
-      {/* 3. Four Compact Mobile Stats Cards */}
-      <div className="grid grid-cols-4 gap-1.5 mt-2">
-        {/* Cumplieron */}
-        <div className="flex flex-col items-center justify-center bg-gradient-to-b from-emerald-50 to-emerald-100/60 border border-emerald-200/80 rounded-xl py-1.5 px-0.5 shadow-2xs">
-          <div className="w-5 h-5 rounded-full bg-emerald-600 text-white flex items-center justify-center mb-0.5 shadow-2xs">
-            <Check className="w-3 h-3 stroke-[3]" />
-          </div>
-          <span className="text-lg font-black text-emerald-950 leading-tight">
-            {stats.completed}
-          </span>
-          <span className="text-[9px] font-bold text-emerald-700 text-center leading-tight">
-            Cumplieron
-          </span>
-        </div>
-
-        {/* No cumplieron */}
-        <div className="flex flex-col items-center justify-center bg-gradient-to-b from-rose-50 to-rose-100/60 border border-rose-200/80 rounded-xl py-1.5 px-0.5 shadow-2xs">
-          <div className="w-5 h-5 rounded-full bg-rose-600 text-white flex items-center justify-center mb-0.5 shadow-2xs">
-            <X className="w-3 h-3 stroke-[3]" />
-          </div>
-          <span className="text-lg font-black text-rose-950 leading-tight">
-            {stats.notCompleted}
-          </span>
-          <span className="text-[9px] font-bold text-rose-700 text-center leading-tight">
-            No cumplieron
-          </span>
-        </div>
-
-        {/* % Cumplimiento */}
-        <div className="flex flex-col items-center justify-center bg-gradient-to-b from-blue-50 to-blue-100/60 border border-blue-200/80 rounded-xl py-1.5 px-0.5 shadow-2xs">
-          <div className="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center mb-0.5 shadow-2xs">
-            <PieChart className="w-3 h-3" />
-          </div>
-          <span className="text-lg font-black text-blue-950 leading-tight">
-            {stats.completionRate}%
-          </span>
-          <span className="text-[9px] font-bold text-blue-700 text-center leading-tight">
-            Cumplimiento
-          </span>
-        </div>
-
-        {/* Revisadas */}
-        <div className="flex flex-col items-center justify-center bg-gradient-to-b from-slate-50 to-slate-100/60 border border-slate-200/80 rounded-xl py-1.5 px-0.5 shadow-2xs">
-          <div className="w-5 h-5 rounded-full bg-slate-700 text-white flex items-center justify-center mb-0.5 shadow-2xs">
-            <FileText className="w-3 h-3" />
-          </div>
-          <span className="text-lg font-black text-slate-900 leading-tight">
-            {stats.reviewed}
-          </span>
-          <span className="text-[9px] font-bold text-slate-600 text-center leading-tight">
-            Revisadas
-          </span>
-        </div>
-      </div>
-
-      {/* 4. Section: DETALLE POR RESPONSABLE */}
-      <div className="mt-2 bg-white border border-gray-200 rounded-2xl p-3 shadow-2xs">
+      {/* 3. Section: DETALLE POR RESPONSABLE (Primary Focus / People First!) */}
+      <div className="mt-2.5 bg-white border border-gray-200/90 rounded-2xl p-3 shadow-2xs">
         {/* Section Header & Legend */}
         <div className="flex items-center justify-between pb-2 border-b border-gray-100">
           <h2 className="text-[11px] font-black tracking-tight text-gray-900 uppercase">
-            DETALLE POR RESPONSABLE
+            RESPONSABLE
           </h2>
-          <div className="flex items-center gap-2 text-[9px] font-bold">
+          <div className="flex items-center gap-1.5 text-[9px] font-bold">
             <div className="flex items-center gap-1 text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-full border border-blue-100">
               <span className="w-1.5 h-1.5 rounded-full bg-blue-600 inline-block" />
-              <span>FB: 8</span>
+              <span>{records[0]?.facebookChecks ? records[0].facebookChecks.length : 6}</span>
             </div>
+            {(records[0]?.marketplaceChecks ? records[0].marketplaceChecks.length : 1) > 0 && (
+              <div className="flex items-center gap-1 text-sky-700 bg-sky-50 px-1.5 py-0.5 rounded-full border border-sky-100">
+                <span className="w-1.5 h-1.5 rounded-full bg-sky-600 inline-block" />
+                <span>{records[0]?.marketplaceChecks ? records[0].marketplaceChecks.length : 1}</span>
+              </div>
+            )}
             <div className="flex items-center gap-1 text-pink-600 bg-pink-50 px-1.5 py-0.5 rounded-full border border-pink-100">
               <span className="w-1.5 h-1.5 rounded-full bg-gradient-to-tr from-amber-400 via-pink-500 to-purple-600 inline-block" />
-              <span>IG: 1</span>
+              <span>1</span>
             </div>
           </div>
         </div>
 
-        {/* Responsible Rows */}
+        {/* Responsible Rows - Sorted with top performers first! */}
         <div className="divide-y divide-gray-100 mt-1">
-          {records.length === 0 ? (
+          {sortedRecords.length === 0 ? (
             <div className="py-6 text-center text-xs text-gray-400">
               No hay responsables activos para esta fecha.
             </div>
           ) : (
-            records.map((record, index) => {
-              const isCompleted = record.totalCount >= 9 || record.status === 'completed';
+            sortedRecords.map((record, index) => {
+              const targetGoal = record.totalGoal || 8;
+              const isCompleted = record.totalCount >= targetGoal || record.status === 'completed';
               const isNotCompleted = record.status === 'not_completed';
               const isJustified = record.status === 'justified';
-
-              // Visual bar: 8 Facebook parts + 1 Instagram part
-              const fbCount = Math.min(8, record.metaCount || 0);
-              const hasIg = !!record.instagramCheck;
               const totalCount = record.totalCount || 0;
 
               const avatarStyle = avatarColors[index % avatarColors.length];
@@ -379,49 +395,45 @@ export const ReportScreen: React.FC<ReportScreenProps> = ({
                 <div
                   key={record.responsibleId}
                   onClick={() => onSelectResponsibleForManagement(record.responsibleId)}
-                  className="flex items-center gap-2.5 py-2.5 px-1 hover:bg-gray-50/80 active:bg-gray-100 rounded-xl transition cursor-pointer group"
+                  className="flex items-center justify-between gap-1.5 py-2 px-1 hover:bg-gray-50/80 active:bg-gray-100 rounded-xl transition cursor-pointer group"
                 >
-                  {/* Colored Initial Avatar */}
-                  <div
-                    className={`w-8 h-8 rounded-full border flex items-center justify-center font-black text-xs shrink-0 shadow-2xs ${avatarStyle}`}
-                  >
-                    {record.responsibleName.charAt(0).toUpperCase()}
-                  </div>
+                  {/* Avatar (Photo or Colored Initial) */}
+                  {record.photoUrl ? (
+                    <img
+                      src={record.photoUrl}
+                      alt={record.responsibleName}
+                      className="w-7 h-7 rounded-full object-cover border border-gray-200 shrink-0 shadow-2xs"
+                    />
+                  ) : (
+                    <div
+                      className={`w-7 h-7 rounded-full border flex items-center justify-center font-black text-xs shrink-0 shadow-2xs ${avatarStyle}`}
+                    >
+                      {record.responsibleName.charAt(0).toUpperCase()}
+                    </div>
+                  )}
 
-                  {/* Name */}
-                  <span className="text-xs font-black text-gray-900 w-16 truncate shrink-0">
+                  {/* PROMINENT NAME (High visual hero priority) */}
+                  <span className="text-base font-black text-gray-900 w-28 sm:w-32 truncate shrink-0">
                     {record.responsibleName}
                   </span>
 
-                  {/* Dual-color Segmented Progress Bar */}
-                  <div className="flex-1 min-w-[70px] bg-gray-100 h-2.5 rounded-full overflow-hidden flex relative p-0.5 border border-gray-200/60">
-                    {/* Meta Facebook portion (up to 8 parts) */}
+                  {/* SHORT & COMPACT PROGRESS BAR (Single continuous line / gradient) */}
+                  <div className="w-14 sm:w-16 h-2 bg-gray-100 rounded-full overflow-hidden flex relative p-0.5 border border-gray-200/50 shrink-0">
                     <div
-                      className={`h-full transition-all duration-300 rounded-l-full ${
+                      className={`h-full transition-all duration-300 rounded-full ${
                         isCompleted
                           ? 'bg-emerald-500'
                           : isNotCompleted
                           ? 'bg-rose-500'
-                          : 'bg-blue-600'
+                          : 'bg-gradient-to-r from-blue-600 via-pink-500 to-amber-400'
                       }`}
-                      style={{ width: `${(fbCount / 9) * 100}%` }}
+                      style={{ width: `${Math.min(100, (totalCount / targetGoal) * 100)}%` }}
                     />
-                    {/* Instagram portion (1 part) */}
-                    {hasIg && (
-                      <div
-                        className={`h-full transition-all duration-300 ${
-                          isCompleted
-                            ? 'bg-emerald-500 rounded-r-full'
-                            : 'bg-gradient-to-r from-amber-400 via-pink-500 to-purple-600 rounded-r-full'
-                        }`}
-                        style={{ width: `${(1 / 9) * 100}%` }}
-                      />
-                    )}
                   </div>
 
                   {/* Fraction Counter */}
                   <span
-                    className={`text-xs font-black w-8 text-right shrink-0 px-1 py-0.5 rounded-md ${
+                    className={`text-xs font-black w-7 text-center shrink-0 px-1 py-0.5 rounded-md ${
                       isCompleted
                         ? 'text-emerald-700 bg-emerald-50 font-black'
                         : isNotCompleted
@@ -429,36 +441,39 @@ export const ReportScreen: React.FC<ReportScreenProps> = ({
                         : 'text-gray-800 bg-gray-100'
                     }`}
                   >
-                    {totalCount}/9
+                    {totalCount}/{targetGoal}
                   </span>
 
-                  {/* Quick Action Check Button */}
-                  <button
-                    type="button"
-                    onClick={(e) => handleQuickCheck(e, record)}
-                    className={`w-7 h-7 rounded-full flex items-center justify-center transition shrink-0 active:scale-90 ${
-                      isCompleted
-                        ? 'bg-emerald-600 text-white shadow-xs ring-2 ring-emerald-200'
-                        : 'bg-gray-200 text-gray-500 hover:bg-emerald-100 hover:text-emerald-700'
-                    }`}
-                    title={isCompleted ? 'Cumplido' : 'Marcar 9/9'}
-                  >
-                    <Check className="w-3.5 h-3.5 stroke-[3]" />
-                  </button>
+                  {/* Action Buttons */}
+                  <div className="flex items-center gap-1 shrink-0">
+                    {/* Quick Action Check Button */}
+                    <button
+                      type="button"
+                      onClick={(e) => handleQuickCheck(e, record)}
+                      className={`w-6 h-6 rounded-full flex items-center justify-center transition shrink-0 active:scale-90 ${
+                        isCompleted
+                          ? 'bg-emerald-600 text-white shadow-xs ring-2 ring-emerald-200'
+                          : 'bg-gray-100 text-gray-400 hover:bg-emerald-100 hover:text-emerald-700'
+                      }`}
+                      title={isCompleted ? 'Cumplido' : 'Marcar 9/9'}
+                    >
+                      <Check className="w-3 h-3 stroke-[3]" />
+                    </button>
 
-                  {/* Quick Action X Button */}
-                  <button
-                    type="button"
-                    onClick={(e) => handleQuickCross(e, record)}
-                    className={`w-7 h-7 rounded-full flex items-center justify-center transition shrink-0 active:scale-90 ${
-                      isNotCompleted
-                        ? 'bg-rose-600 text-white shadow-xs ring-2 ring-rose-200'
-                        : 'bg-gray-200 text-gray-500 hover:bg-rose-100 hover:text-rose-700'
-                    }`}
-                    title="Marcar no cumplido"
-                  >
-                    <X className="w-3.5 h-3.5 stroke-[3]" />
-                  </button>
+                    {/* Quick Action X Button */}
+                    <button
+                      type="button"
+                      onClick={(e) => handleQuickCross(e, record)}
+                      className={`w-6 h-6 rounded-full flex items-center justify-center transition shrink-0 active:scale-90 ${
+                        isNotCompleted
+                          ? 'bg-rose-600 text-white shadow-xs ring-2 ring-rose-200'
+                          : 'bg-gray-100 text-gray-400 hover:bg-rose-100 hover:text-rose-700'
+                      }`}
+                      title="Marcar no cumplido"
+                    >
+                      <X className="w-3 h-3 stroke-[3]" />
+                    </button>
+                  </div>
                 </div>
               );
             })
@@ -466,46 +481,237 @@ export const ReportScreen: React.FC<ReportScreenProps> = ({
         </div>
       </div>
 
-      {/* 5. Section: Observaciones del día with Colorful AI Accents */}
-      <div className="mt-3 bg-gradient-to-b from-white to-gray-50/60 border border-gray-200 rounded-2xl p-3.5 shadow-2xs">
-        <div className="flex items-center justify-between pb-2">
+      {/* 4. The 4 Metric Buttons / Cards (Text to the right of number, 2 lines for longer ones) */}
+      <div className="grid grid-cols-2 gap-2 mt-2.5">
+        {/* Cumplieron */}
+        <div className="flex items-center gap-2.5 bg-gradient-to-b from-emerald-50 to-emerald-100/60 border border-emerald-200/80 rounded-2xl py-2 px-3 shadow-2xs">
+          <div className="w-7 h-7 rounded-full bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-2xs">
+            <Check className="w-3.5 h-3.5 stroke-[3]" />
+          </div>
+          <span className="text-xl font-black text-emerald-950 leading-none shrink-0">
+            {stats.completed}
+          </span>
+          <div className="flex flex-col text-[11px] font-bold text-emerald-850 leading-tight">
+            <span>Cumplieron</span>
+          </div>
+        </div>
+
+        {/* No cumplieron */}
+        <div className="flex items-center gap-2.5 bg-gradient-to-b from-rose-50 to-rose-100/60 border border-rose-200/80 rounded-2xl py-2 px-3 shadow-2xs">
+          <div className="w-7 h-7 rounded-full bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-2xs">
+            <X className="w-3.5 h-3.5 stroke-[3]" />
+          </div>
+          <span className="text-xl font-black text-rose-950 leading-none shrink-0">
+            {stats.notCompleted}
+          </span>
+          <div className="flex flex-col text-[11px] font-bold text-rose-850 leading-tight">
+            <span>No cumplieron</span>
+          </div>
+        </div>
+
+        {/* Cumplimiento general (2 líneas) */}
+        <div className="flex items-center gap-2.5 bg-gradient-to-b from-blue-50 to-blue-100/60 border border-blue-200/80 rounded-2xl py-2 px-3 shadow-2xs">
+          <div className="w-7 h-7 rounded-full bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-2xs">
+            <PieChart className="w-3.5 h-3.5" />
+          </div>
+          <span className="text-xl font-black text-blue-950 leading-none shrink-0">
+            {stats.completionRate}%
+          </span>
+          <div className="flex flex-col text-[10px] font-bold text-blue-900 leading-[1.15]">
+            <span>Cumplimiento</span>
+            <span className="text-[9px] font-medium text-blue-650">general</span>
+          </div>
+        </div>
+
+        {/* Personas revisadas (2 líneas) */}
+        <div className="flex items-center gap-2.5 bg-gradient-to-b from-slate-50 to-slate-100/60 border border-slate-200/80 rounded-2xl py-2 px-3 shadow-2xs">
+          <div className="w-7 h-7 rounded-full bg-slate-700 text-white flex items-center justify-center shrink-0 shadow-2xs">
+            <FileText className="w-3.5 h-3.5" />
+          </div>
+          <span className="text-xl font-black text-slate-900 leading-none shrink-0">
+            {stats.reviewed}
+          </span>
+          <div className="flex flex-col text-[10px] font-bold text-slate-800 leading-[1.15]">
+            <span>Personas</span>
+            <span className="text-[9px] font-medium text-slate-500">revisadas</span>
+          </div>
+        </div>
+      </div>
+
+      {/* 5. Section: Observaciones del día (Caja completa con botones enteros) */}
+      <div className="mt-3 bg-gradient-to-b from-white to-gray-50/70 border border-gray-200 rounded-2xl p-3.5 shadow-2xs">
+        <div className="flex items-center justify-between pb-1">
           <div className="flex items-center gap-1.5">
-            <div className="w-6 h-6 rounded-lg bg-red-100 text-red-600 flex items-center justify-center">
+            <div className="w-6 h-6 rounded-lg bg-red-100 text-red-600 flex items-center justify-center shrink-0">
               <FileText className="w-3.5 h-3.5" />
             </div>
             <h3 className="text-xs font-black tracking-tight text-gray-900">
               Observaciones del día
             </h3>
           </div>
+          <span className="text-[10px] font-semibold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
+            Reporte oficial
+          </span>
+        </div>
+
+        {/* 2 Botones enteros: Automático y Con texto de ayuda */}
+        <div className="grid grid-cols-2 gap-2 mt-2.5 mb-2.5">
+          {/* Botón 1: Automático */}
           <button
+            type="button"
             onClick={handleGenerateAI}
-            disabled={aiGenerating}
-            className="flex items-center gap-1.5 text-xs font-bold text-white bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 px-3 py-1 rounded-full shadow-xs active:scale-95 transition"
-            title="Analizar y generar con Inteligencia Artificial"
+            disabled={aiGenerating || improvingWithNotes}
+            className="w-full flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl font-bold text-xs text-white bg-gradient-to-r from-red-600 via-rose-600 to-red-700 hover:from-red-700 hover:to-rose-800 shadow-xs transition active:scale-98 disabled:opacity-60 cursor-pointer"
+            title="Generar observación automática según métricas"
           >
             {aiGenerating ? (
-              <Loader2 className="w-3 h-3 animate-spin" />
+              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
             ) : (
-              <Sparkles className="w-3 h-3" />
+              <Sparkles className="w-3.5 h-3.5 shrink-0" />
             )}
-            <span>{aiGenerating ? 'Analizando...' : 'Generar con IA'}</span>
+            <span className="truncate">{aiGenerating ? 'Analizando...' : '⚡ Automático'}</span>
+          </button>
+
+          {/* Botón 2: Con texto de ayuda */}
+          <button
+            type="button"
+            onClick={() => setShowUserNotesModal(true)}
+            disabled={aiGenerating || improvingWithNotes}
+            className="w-full flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl font-bold text-xs text-white bg-gradient-to-r from-slate-800 via-slate-900 to-black hover:from-black hover:to-slate-900 shadow-xs transition active:scale-98 disabled:opacity-60 cursor-pointer"
+            title="Ingresar texto de ayuda para que la IA mejore la redacción"
+          >
+            {improvingWithNotes ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+            ) : (
+              <PencilLine className="w-3.5 h-3.5 shrink-0" />
+            )}
+            <span className="truncate">{improvingWithNotes ? 'Redactando...' : '✍️ Con texto de ayuda'}</span>
           </button>
         </div>
 
+        {/* Caja de texto amplia y completa */}
         <textarea
-          rows={3}
+          rows={4}
           value={effectiveObservation}
           onChange={handleObservationChange}
-          placeholder="Escribe una observación o pulsa 'Generar con IA'..."
-          maxLength={200}
-          className="w-full text-xs font-medium text-gray-800 bg-white rounded-xl p-2.5 border border-gray-200 focus:border-red-500 focus:ring-1 focus:ring-red-500 focus:outline-hidden transition resize-none placeholder:text-gray-400 shadow-2xs"
+          placeholder="Aquí se muestra la observación del día para la imagen y WhatsApp. Puedes editarla directamente o usar los botones de arriba..."
+          maxLength={350}
+          className="w-full text-xs font-medium text-gray-800 bg-white rounded-xl p-3 border border-gray-200 focus:border-red-500 focus:ring-1 focus:ring-red-500 focus:outline-hidden transition resize-y placeholder:text-gray-400 shadow-2xs leading-relaxed"
         />
 
-        <div className="flex justify-between items-center mt-1 text-[10px] text-gray-400 font-semibold px-0.5">
-          <span>{aiGenerating ? 'Analizando datos reales...' : 'Listo para WhatsApp'}</span>
-          <span>{effectiveObservation.length}/200</span>
+        <div className="flex justify-between items-center mt-1.5 text-[10px] text-gray-400 font-semibold px-0.5">
+          <span>
+            {aiGenerating
+              ? 'Analizando métricas del día...'
+              : improvingWithNotes
+              ? 'Perfeccionando redacción ejecutiva...'
+              : 'Listo para WhatsApp e imagen de reporte'}
+          </span>
+          <span>{effectiveObservation.length}/350</span>
         </div>
       </div>
+
+      {/* Modal: Redactar observación con texto de ayuda */}
+      {showUserNotesModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-xs p-3 animate-fade-in">
+          <div className="w-full max-w-sm bg-white rounded-3xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden border border-gray-100">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between px-4 py-3.5 border-b border-gray-100 bg-gray-50/80">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-xl bg-slate-900 text-white flex items-center justify-center">
+                  <PencilLine className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-xs font-black text-gray-900 leading-tight">
+                    Redactar con texto de ayuda
+                  </h3>
+                  <span className="text-[10px] text-gray-500 block leading-tight">
+                    La IA mejorará la redacción y la integrará al reporte
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowUserNotesModal(false)}
+                className="p-1 rounded-full text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-4 flex flex-col gap-3 overflow-y-auto">
+              <p className="text-[11px] text-gray-600 leading-relaxed font-medium">
+                Escribe notas rápidas, motivos o aclaraciones (ej. cortes de energía, acuerdos, prórrogas o permisos). La IA pulirá la redacción y la unirá al resumen de cumplimiento del reporte:
+              </p>
+
+              <textarea
+                rows={4}
+                value={userNotesInput}
+                onChange={(e) => setUserNotesInput(e.target.value)}
+                placeholder="Ejemplo: Hubo intermitencia técnica en la tarde, pero los responsables se comprometieron a completar sus publicaciones pendientes antes de las 9:00 PM..."
+                className="w-full text-xs font-medium text-gray-800 bg-gray-50 rounded-xl p-3 border border-gray-200 focus:border-slate-800 focus:bg-white focus:ring-1 focus:ring-slate-800 focus:outline-hidden transition resize-none placeholder:text-gray-400 leading-relaxed"
+                autoFocus
+              />
+
+              {/* Quick suggestions chips */}
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">
+                  Sugerencias rápidas:
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    'Intermitencia técnica en la tarde',
+                    'Prórroga autorizada para la noche',
+                    'Permiso justificado con compensación',
+                    'Excelente regularidad y cumplimiento',
+                  ].map((chip) => (
+                    <button
+                      key={chip}
+                      type="button"
+                      onClick={() =>
+                        setUserNotesInput((prev) =>
+                          prev ? prev + '. ' + chip : chip
+                        )
+                      }
+                      className="text-[10px] font-semibold bg-gray-100 hover:bg-gray-200 text-gray-700 px-2 py-1 rounded-lg transition active:scale-95 cursor-pointer"
+                    >
+                      + {chip}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-3 border-t border-gray-100 bg-gray-50/80 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowUserNotesModal(false)}
+                disabled={improvingWithNotes}
+                className="px-3 py-2 rounded-xl text-xs font-bold text-gray-700 bg-white border border-gray-200 hover:bg-gray-100 transition cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleApplyUserNotes}
+                disabled={!userNotesInput.trim() || improvingWithNotes}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-slate-900 to-black hover:from-black hover:to-slate-900 transition shadow-xs flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+              >
+                {improvingWithNotes ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Wand2 className="w-3.5 h-3.5" />
+                )}
+                <span>
+                  {improvingWithNotes ? 'Perfeccionando...' : 'Mejorar redacción'}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 6. Primary Action: Generar imagen de reporte */}
       <div className="mt-3">
@@ -624,6 +830,42 @@ export const ReportScreen: React.FC<ReportScreenProps> = ({
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>Descargar archivo PNG</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Confirm Reset Day Publications */}
+      {showResetConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4 animate-fade-in">
+          <div className="w-full max-w-xs bg-white rounded-3xl p-5 shadow-2xl border border-gray-100">
+            <div className="w-10 h-10 rounded-full bg-red-100 text-red-600 flex items-center justify-center mb-3">
+              <RotateCcw className="w-5 h-5" />
+            </div>
+            <h3 className="text-sm font-black text-gray-900">
+              ¿Resetear publicaciones de hoy?
+            </h3>
+            <p className="mt-2 text-xs text-gray-600 leading-relaxed">
+              Todos los conteos del día volverán a <strong>0/9</strong> (pendiente). <strong>Los nombres, fotos y responsables se mantendrán intactos.</strong>
+            </p>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowResetConfirm(false)}
+                disabled={isResetting}
+                className="px-3 py-2 rounded-xl text-xs font-bold text-gray-700 bg-gray-100 hover:bg-gray-200 transition"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleResetDayPublications}
+                disabled={isResetting}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-red-600 hover:bg-red-700 transition shadow-xs flex items-center gap-1.5"
+              >
+                {isResetting ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+                <span>{isResetting ? 'Reseteando...' : 'Sí, resetear'}</span>
               </button>
             </div>
           </div>
